@@ -1,3 +1,4 @@
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::ptr::NonNull;
 
 pub struct Value {
@@ -34,6 +35,11 @@ impl Value {
         self.num_bits.div_ceil(8)
     }
 
+    #[inline]
+    pub fn num_words(&self) -> usize {
+        (self.num_bits as usize).div_ceil(64)
+    }
+
     /// Get a slice to the bytes on the heap.
     ///
     /// # Safety
@@ -46,6 +52,47 @@ impl Value {
         let num_bytes = self.byte_size();
         // SAFETY: This is a pointer to `self.byte_size()` u64s on the heap. This slice is valid.
         unsafe { std::slice::from_raw_parts(ptr.as_ptr(), num_bytes as usize) }
+    }
+}
+
+impl Drop for Value {
+    fn drop(&mut self) {
+        if !self.interned() {
+            // SAFETY: We know the union has a pointer because the data is not interned.
+            let ptr = unsafe { self.value.ptr };
+            let num_allocated = self.num_words();
+            let layout = Layout::array::<u64>(num_allocated)
+                .expect("Should be able to create layout for something we allocated");
+            // SAFETY: The layout has nonzero size since we don't support nonzero sizes.
+            unsafe { System.dealloc(ptr.as_ptr() as *mut _, layout) };
+        }
+    }
+}
+
+impl From<&[u64]> for Value {
+    fn from(value: &[u64]) -> Self {
+        if value.len() == 1 {
+            let val = value[0];
+            Self {
+                num_bits: 64,
+                value: Backing { val },
+            }
+        } else if value.len() > 1 {
+            let num_bits: u32 = (64usize.saturating_mul(value.len()))
+                .try_into()
+                .expect("Can't represent that many bits");
+            let layout =
+                Layout::array::<u64>(value.len()).expect("Can't create layout for backing memory");
+            // SAFETY: The size can't be zero.
+            let ptr = unsafe { System.alloc(layout) };
+            let ptr = NonNull::new(ptr as *mut u64).expect("Allocation failed");
+            Self {
+                num_bits,
+                value: Backing { ptr },
+            }
+        } else {
+            panic!("Don't support zero sized integers");
+        }
     }
 }
 
