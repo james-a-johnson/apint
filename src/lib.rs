@@ -22,6 +22,30 @@ impl Value {
         }
     }
 
+    #[inline]
+    pub fn new_u16(val: u16) -> Self {
+        Self {
+            num_bits: 16,
+            value: Backing { val: val as u64 },
+        }
+    }
+
+    #[inline]
+    pub fn new_u32(val: u32) -> Self {
+        Self {
+            num_bits: 32,
+            value: Backing { val: val as u64 },
+        }
+    }
+
+    #[inline]
+    pub fn new_u64(val: u64) -> Self {
+        Self {
+            num_bits: 64,
+            value: Backing { val },
+        }
+    }
+
     pub fn parse_from_words(data: &[u64], num_bits: u32) -> Self {
         let mut value = if num_bits <= 64 {
             Self {
@@ -111,9 +135,9 @@ impl Value {
         // SAFETY: Safety contract of this function requires that the struct actually contains a pointer. So this is
         // safe as long as the function's safety contract is satisfied.
         let ptr = unsafe { self.value.ptr };
-        let num_bytes = self.byte_size();
+        let num_words = self.num_words();
         // SAFETY: This is a pointer to `self.byte_size()` u64s on the heap. This slice is valid.
-        unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr(), num_bytes as usize) }
+        unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr(), num_words as usize) }
     }
 }
 
