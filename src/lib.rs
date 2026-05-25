@@ -1,3 +1,14 @@
+//! Arbitrary precision integer arithmetic library.
+//!
+//! This library is based off of [LLVM's APInt](https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/ADT/APInt.h)
+//! class. It offers the ability to emulate operations on integers with an arbitrary number of bits.
+//!
+//! This specific implementation is written expressly for the needs of [Emil](https://github.com/james-a-johnson/emil). So some
+//! implementation choices and decision decisions may differ from the LLVM one slightly.
+//!
+//! The main export of this library is the [`Value`] struct. That represents signed or unsigned integers with an arbitrary number of bits.
+//! It supports all of the operations that are required by Emil.
+
 mod alloc;
 use std::hint::cold_path;
 use std::ops::{Add, BitOr};
@@ -23,6 +34,35 @@ unsafe impl Send for Value {}
 // heap allocated data. It is safe to share references to taht data across threads.
 unsafe impl Sync for Value {}
 
+/// Integer value with an arbitrary number of bits.
+///
+/// This struct is used to represent signed or unsigned integers with an arbitrary number of bits.
+///
+/// You can create one from any of the basic integer types (`u8`, `u16`, `u32`, `u64`). Constructors only accept the unsigned version
+/// of types. You can cast a signed value to the unsigned version and then construct it if you want to represent a signed value. Each
+/// operation that this struct supports will either implement signed or unsigned behavior.
+///
+/// Each of the operations from [`std::ops`] implement unsigned operations. Only methods that explicitly say they are signed operations
+/// emulate a signed operation.
+///
+/// # Implementation
+/// `Value` is a manually implemented tagged union. The `num_bits` field serves as the tag and indicats now many bits are in the value
+/// the instance represents. 64 or fewer bits and the value is stored in a single `u64` word. More than 64 bits and the value is stored
+/// as a number of `u64` words that are allocated on the heap.
+///
+/// The tagged union comes from the pointer and interned value being the same data held in a C style union. This keeps the struct as
+/// small as possible.
+///
+/// # Examples
+///
+/// ```
+/// use apint::Value;
+///
+/// let val1 = Value::new_u8(123);
+/// let val2 = Value::new_u8(111);
+/// let result = val1 + val2;
+/// assert_eq!(result.get_word(), 234);
+/// ```
 impl Value {
     #[inline]
     pub fn new_u8(val: u8) -> Self {
