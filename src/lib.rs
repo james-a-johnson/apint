@@ -124,6 +124,41 @@ impl Value {
         value
     }
 
+    pub fn parse_from_bytes(data: &[u8], num_bits: u32) -> Self {
+        let num_bytes = num_bits.div_ceil(8);
+        assert!(data.len() >= num_bytes as usize, "Not enough data to parse");
+        assert!(num_bits > 0, "Cannot parse 0 bits");
+        if num_bits <= 64 {
+            let mut val = 0u64;
+            // SAFETY: One of the values is stack allocated and the other is from a slice passed into this function so they can't overlap at all.
+            // data can be read for `num_bytes` values validly. We check its length and make sure it has enough elements. We also know that we
+            // are handling at most 64 bits or 8 bytes in this branch. So `num_bytes` can't be more than 8 and must be at least 1. Those are valid
+            // ranges of sizes that we can copy into a u64;
+            unsafe {
+                std::ptr::copy(
+                    data.as_ptr(),
+                    &mut val as *mut u64 as *mut u8,
+                    num_bytes as usize,
+                );
+            }
+            Self {
+                num_bits,
+                value: Backing { val },
+            }
+        } else {
+            let ptr = crate::alloc::alloc_bits(num_bits);
+            // SAFETY: See above comment for why it's safe to copy data for `num_bytes` bytes. ptr is a new allocation so it can't overlap with `data`.
+            // ptr is guaranteed to be readable the required number of bytes as the num_bits and num_bytes calculation guarantees that.
+            unsafe {
+                std::ptr::copy(data.as_ptr(), ptr.as_ptr() as *mut u8, num_bytes as usize);
+            }
+            Self {
+                num_bits,
+                value: Backing { ptr },
+            }
+        }
+    }
+
     /// Clear any high bits that are not used.
     fn clear_unused_bits(&mut self) {
         #[expect(
@@ -499,5 +534,17 @@ mod test {
         assert!(result.is_err());
         let result = std::panic::catch_unwind(|| a.clone() | b.clone());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_from_bytes() {
+        let a = Value::parse_from_bytes(&[0xaa, 0xbb, 0xcc, 0xdd], 24);
+        assert_eq!(a.get_word(), 0xccbbaa);
+
+        let b = Value::parse_from_bytes(
+            &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa],
+            72,
+        );
+        assert_eq!(b.get_slice(), &[0x8877665544332211, 0x99]);
     }
 }
