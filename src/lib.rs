@@ -1,4 +1,5 @@
 mod alloc;
+use std::ops::Add;
 use std::ptr::NonNull;
 
 pub struct Value {
@@ -112,6 +113,22 @@ impl Value {
         (self.num_bits as usize).div_ceil(64)
     }
 
+    pub fn get_word(&self) -> u64 {
+        if self.interned() {
+            unsafe { self.value.val }
+        } else {
+            panic!("Value is not interned")
+        }
+    }
+
+    pub fn get_slice(&self) -> &[u64] {
+        if self.interned() {
+            panic!("Value is interned")
+        } else {
+            unsafe { self.as_slice() }
+        }
+    }
+
     /// Get a slice to the bytes on the heap.
     ///
     /// # Safety
@@ -121,9 +138,9 @@ impl Value {
         // SAFETY: Safety contract of this function requires that the struct actually contains a pointer. So this is
         // safe as long as the function's safety contract is satisfied.
         let ptr = unsafe { self.value.ptr };
-        let num_bytes = self.byte_size();
+        let num_words = self.num_words();
         // SAFETY: This is a pointer to `self.byte_size()` u64s on the heap. This slice is valid.
-        unsafe { std::slice::from_raw_parts(ptr.as_ptr(), num_bytes as usize) }
+        unsafe { std::slice::from_raw_parts(ptr.as_ptr(), num_words as usize) }
     }
 
     /// Get a mutable slice to the bytes on the heap.
@@ -138,6 +155,48 @@ impl Value {
         let num_words = self.num_words();
         // SAFETY: This is a pointer to `self.byte_size()` u64s on the heap. This slice is valid.
         unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr(), num_words as usize) }
+    }
+
+    fn big_add(&self, rhs: &Self, mut carry: bool) -> Self {
+        assert!(!self.interned());
+        assert_eq!(self.num_bits, rhs.num_bits);
+        let num_words = self.num_words();
+        let ptr = crate::alloc::alloc_bits(self.num_bits);
+        // SAFETY: We know both of them are not interned.
+        let lhs = unsafe { self.as_slice() };
+        let rhs = unsafe { rhs.as_slice() };
+        for i in 0..num_words {
+            let (val, new_carry) = lhs[i].carrying_add(rhs[i], carry);
+            unsafe { ptr.add(i).write(val) };
+            carry = new_carry;
+        }
+        Self {
+            num_bits: self.num_bits,
+            value: Backing { ptr },
+        }
+    }
+}
+
+impl Add for Value {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        assert!(
+            self.num_bits == rhs.num_bits,
+            "Adding values with different bit widths"
+        );
+        let mut new_value = if self.interned() {
+            Self {
+                num_bits: self.num_bits,
+                value: Backing {
+                    val: unsafe { self.value.val + rhs.value.val },
+                },
+            }
+        } else {
+            self.big_add(&rhs, false)
+        };
+        new_value.clear_unused_bits();
+        new_value
     }
 }
 
@@ -249,5 +308,18 @@ mod test {
     fn allocates_large_values() {
         let large = Value::parse_from_words(&[4096, 4096], 96);
         assert!(!large.interned());
+    }
+
+    #[test]
+    fn adding_values() {
+        let small_a = Value::new_u32(u32::MAX);
+        let small_b = Value::new_u32(2);
+        let small_c = small_a + small_b;
+        assert_eq!(small_c.get_word(), 0x1);
+
+        let big_a = Value::parse_from_words(&[u64::MAX, 2], 96);
+        let big_b = Value::parse_from_words(&[1, 3], 96);
+        let big_c = big_a + big_b;
+        assert_eq!(big_c.get_slice(), &[0, 6]);
     }
 }
