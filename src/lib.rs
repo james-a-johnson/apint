@@ -1,6 +1,6 @@
 mod alloc;
 use std::hint::cold_path;
-use std::ops::Add;
+use std::ops::{Add, BitOr};
 use std::ptr::NonNull;
 
 pub struct Value {
@@ -204,6 +204,40 @@ impl Add for Value {
     }
 }
 
+impl BitOr for Value {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        assert!(
+            self.num_bits == rhs.num_bits,
+            "Bitwise OR of values with different bit widths"
+        );
+        // Don't need to clear unused bits here because they can't get set via a bitwise or
+        if self.interned() {
+            let val = unsafe { self.value.val | rhs.value.val };
+            Self {
+                num_bits: self.num_bits,
+                value: Backing { val },
+            }
+        } else {
+            cold_path();
+            let num_words = self.num_words();
+            let ptr = crate::alloc::alloc_bits(self.num_bits);
+            // SAFETY: We know both of them are not interned.
+            let lhs = unsafe { self.as_slice() };
+            let rhs = unsafe { rhs.as_slice() };
+            for i in 0..num_words {
+                let val = lhs[i] | rhs[i];
+                unsafe { ptr.add(i).write(val) };
+            }
+            Self {
+                num_bits: self.num_bits,
+                value: Backing { ptr },
+            }
+        }
+    }
+}
+
 impl Clone for Value {
     fn clone(&self) -> Self {
         if self.interned() {
@@ -215,7 +249,16 @@ impl Clone for Value {
             }
         } else {
             cold_path();
-            todo!()
+            let num_words = self.num_words();
+            let ptr = crate::alloc::alloc_bits(self.num_bits);
+            // SAFETY: We know both of them are not interned.
+            unsafe {
+                std::ptr::copy(self.value.ptr.as_ptr(), ptr.as_ptr(), num_words);
+            }
+            Self {
+                num_bits: self.num_bits,
+                value: Backing { ptr },
+            }
         }
     }
 }
@@ -332,10 +375,25 @@ mod test {
     }
 
     #[test]
-    fn different_sized_add() {
+    fn bitwise_or_values() {
+        let small_a = Value::new_u64(0b10101010101010101010);
+        let small_b = Value::new_u64(0b01010101010101010101);
+        let small_c = small_a | small_b;
+        assert_eq!(small_c.get_word(), 0b11111111111111111111);
+
+        let big_a = Value::parse_from_words(&[0b1010, 0b1100], 67);
+        let big_b = Value::parse_from_words(&[0b0101, 0b0011], 67);
+        let big_c = big_a | big_b;
+        assert_eq!(big_c.get_slice(), &[0b1111, 0b0111]);
+    }
+
+    #[test]
+    fn different_sized_ops_panic() {
         let a = Value::new_u8(12);
         let b = Value::new_u16(100);
-        let result = std::panic::catch_unwind(|| a + b);
+        let result = std::panic::catch_unwind(|| a.clone() + b.clone());
+        assert!(result.is_err());
+        let result = std::panic::catch_unwind(|| a.clone() | b.clone());
         assert!(result.is_err());
     }
 }
