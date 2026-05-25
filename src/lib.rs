@@ -1,4 +1,5 @@
 mod alloc;
+use std::hint::cold_path;
 use std::ops::Add;
 use std::ptr::NonNull;
 
@@ -54,6 +55,7 @@ impl Value {
                 value: Backing { val: data[0] },
             }
         } else {
+            cold_path();
             let num_words = num_bits.div_ceil(64);
             assert!(data.len() >= num_words as usize, "Not enough data to parse");
             let ptr = crate::alloc::alloc_bits(num_bits);
@@ -81,6 +83,7 @@ impl Value {
                 self.value.val &= mask;
             }
         } else {
+            cold_path();
             unsafe {
                 let slice = self.as_slice_mut();
                 slice[slice.len() - 1] &= mask;
@@ -193,6 +196,7 @@ impl Add for Value {
                 },
             }
         } else {
+            cold_path();
             self.big_add(&rhs, false)
         };
         new_value.clear_unused_bits();
@@ -210,6 +214,7 @@ impl Clone for Value {
                 },
             }
         } else {
+            cold_path();
             todo!()
         }
     }
@@ -218,6 +223,7 @@ impl Clone for Value {
 impl Drop for Value {
     fn drop(&mut self) {
         if !self.interned() {
+            cold_path();
             // SAFETY: We know the union has a pointer because the data is not interned.
             let ptr = unsafe { self.value.ptr };
             crate::alloc::free_bits(ptr, self.num_bits);
@@ -234,6 +240,7 @@ impl From<&[u64]> for Value {
                 value: Backing { val },
             }
         } else if value.len() > 1 {
+            cold_path();
             let num_bits: u32 = (64usize.saturating_mul(value.len()))
                 .try_into()
                 .expect("Can't represent that many bits");
@@ -244,6 +251,7 @@ impl From<&[u64]> for Value {
                 value: Backing { ptr },
             }
         } else {
+            cold_path();
             panic!("Don't support zero sized integers");
         }
     }
