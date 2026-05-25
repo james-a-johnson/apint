@@ -20,6 +20,10 @@ pub fn alloc_bits(num_bits: u32) -> NonNull<u64> {
     // of the size of u64 which is also 8 bytes. We limit to allocating at most u32 u64s. That means the largest value will be u32::MAX * 8 bytes which will not
     // overflow an isize on a 64 bit system.
     let layout = unsafe {
+        #[expect(
+            clippy::arithmetic_side_effects,
+            reason = "The multiplication here can never overflow"
+        )]
         Layout::from_size_align_unchecked(
             num * std::mem::size_of::<u64>(),
             std::mem::align_of::<u64>(),
@@ -47,6 +51,10 @@ pub fn free_bits(ptr: NonNull<u64>, num_bits: u32) {
     let num = num as usize;
     // SAFETY: Requirements of this function are that align is not zero, align is a power of two, and size rounded up to the nearest multiple of align does not overflow isize.
     let layout = unsafe {
+        #[expect(
+            clippy::arithmetic_side_effects,
+            reason = "The multiplication here can never overflow"
+        )]
         Layout::from_size_align_unchecked(
             num * std::mem::size_of::<u64>(),
             std::mem::align_of::<u64>(),

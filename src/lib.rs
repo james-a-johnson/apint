@@ -97,15 +97,17 @@ impl Value {
     }
 
     pub fn parse_from_words(data: &[u64], num_bits: u32) -> Self {
+        let num_words = num_bits.div_ceil(64);
+        assert!(data.len() >= num_words as usize, "Not enough data to parse");
         let mut value = if num_bits <= 64 {
+            // SAFETY: We know that `data` has at least one element from the above check.
+            let val = unsafe { *data.get_unchecked(0) };
             Self {
                 num_bits,
-                value: Backing { val: data[0] },
+                value: Backing { val },
             }
         } else {
             cold_path();
-            let num_words = num_bits.div_ceil(64);
-            assert!(data.len() >= num_words as usize, "Not enough data to parse");
             let ptr = crate::alloc::alloc_bits(num_bits);
             // SAFETY: Requirements: source and destination must be valid for reads/writes of `num_words` u64s and they must be properly aligned.
             // A softer requirement is that they must not overlap in a way that could invalidate anything.
@@ -124,17 +126,28 @@ impl Value {
 
     /// Clear any high bits that are not used.
     fn clear_unused_bits(&mut self) {
+        #[expect(
+            clippy::arithmetic_side_effects,
+            reason = "This is guaranteed to never underflow"
+        )]
         let zero_bits = 64 - (self.num_bits % 64);
         let mask = u64::MAX >> zero_bits;
         if self.interned() {
+            // SAFETY: We know this is interned so the `val` field is inhabited.
             unsafe {
                 self.value.val &= mask;
             }
         } else {
             cold_path();
+            // SAFETY: We know that this is an allocated value so the `ptr` field is inhabited and therefore it is safe to get a
+            // slice to the heap data.
+            let slice = unsafe { self.as_slice_mut() };
+            // The slice must have at least two elements. This subtraction is fine and won't actually ever wrap.
+            let idx = slice.len().wrapping_sub(1);
+            // SAFETY: We know that this idx is valid since it's one less than the length of the slice and the
+            // slice must have at least two elements.
             unsafe {
-                let slice = self.as_slice_mut();
-                slice[slice.len() - 1] &= mask;
+                *slice.get_unchecked_mut(idx) &= mask;
             }
         }
     }
@@ -164,18 +177,34 @@ impl Value {
         (self.num_bits as usize).div_ceil(64)
     }
 
+    /// Get the value as a single word.
+    ///
+    /// This function requires that the value is interned and not allocated on the heap. You can check that it is
+    /// interned by calling [`Self::interned`] and ensuring it returns true.
+    ///
+    /// # Panics
+    /// Panics if the value is allocated.
     pub fn get_word(&self) -> u64 {
         if self.interned() {
+            // SAFETY: We checked tha this is interned so the `val` field is inhabited.
             unsafe { self.value.val }
         } else {
             panic!("Value is not interned")
         }
     }
 
+    /// Get a slice to the words on the heap.
+    ///
+    /// This function requires that the value is actually allocated on the heap and not interned. You can check that it is
+    /// allocated by calling [`Self::interned`] and ensuring it returns false.
+    ///
+    /// # Panics
+    /// Panics if the value is interned.
     pub fn get_slice(&self) -> &[u64] {
         if self.interned() {
             panic!("Value is interned")
         } else {
+            // SAFETY: We know that the value is stored on the heap so the pointer field of the union is inhabited.
             unsafe { self.as_slice() }
         }
     }
@@ -191,7 +220,7 @@ impl Value {
         let ptr = unsafe { self.value.ptr };
         let num_words = self.num_words();
         // SAFETY: This is a pointer to `self.byte_size()` u64s on the heap. This slice is valid.
-        unsafe { std::slice::from_raw_parts(ptr.as_ptr(), num_words as usize) }
+        unsafe { std::slice::from_raw_parts(ptr.as_ptr(), num_words) }
     }
 
     /// Get a mutable slice to the bytes on the heap.
@@ -205,20 +234,26 @@ impl Value {
         let ptr = unsafe { self.value.ptr };
         let num_words = self.num_words();
         // SAFETY: This is a pointer to `self.byte_size()` u64s on the heap. This slice is valid.
-        unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr(), num_words as usize) }
+        unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr(), num_words) }
     }
 
     fn big_add(&self, rhs: &Self, mut carry: bool) -> Self {
         assert!(!self.interned());
         assert_eq!(self.num_bits, rhs.num_bits);
-        let num_words = self.num_words();
         let ptr = crate::alloc::alloc_bits(self.num_bits);
         // SAFETY: We know both of them are not interned.
         let lhs = unsafe { self.as_slice() };
+        // SAFETY: We know both of them are not interned.
         let rhs = unsafe { rhs.as_slice() };
-        for i in 0..num_words {
-            let (val, new_carry) = lhs[i].carrying_add(rhs[i], carry);
-            unsafe { ptr.add(i).write(val) };
+        for (i, (l, r)) in lhs.iter().zip(rhs).enumerate() {
+            let (val, new_carry) = l.carrying_add(*r, carry);
+            // SAFETY: This requires that `i` * sizeof(u64) does not overflow an `isize`. The largest theoretical
+            // allocation is 2**32 / 8 bytes whic is less than 600 million. That is less than a u32 so cannot
+            // overflow an `isize`. Also requires that the calculated pointer be valid. Since this is from an
+            // allocation of a known size, that will be the case.
+            let offset = unsafe { ptr.add(i) };
+            // SAFETY: See above comment. This will be aligned and point to allocated memory that we can write to.
+            unsafe { offset.write(val) };
             carry = new_carry;
         }
         Self {
@@ -237,11 +272,14 @@ impl Add for Value {
             "Adding values with different bit widths"
         );
         let mut new_value = if self.interned() {
+            // SAFETY: We know both of the values are interned in this branch.
+            let left = unsafe { self.value.val };
+            // SAFETY: We know both of the values are interned in this branch.
+            let right = unsafe { rhs.value.val };
+            let val = left.wrapping_add(right);
             Self {
                 num_bits: self.num_bits,
-                value: Backing {
-                    val: unsafe { self.value.val + rhs.value.val },
-                },
+                value: Backing { val },
             }
         } else {
             cold_path();
@@ -262,21 +300,32 @@ impl BitOr for Value {
         );
         // Don't need to clear unused bits here because they can't get set via a bitwise or
         if self.interned() {
-            let val = unsafe { self.value.val | rhs.value.val };
+            // SAFETY: From the above check we know this value is interned.
+            let left = unsafe { self.value.val };
+            // SAFETY: From the above check we know this value is interned.
+            let right = unsafe { rhs.value.val };
+            let val = left | right;
             Self {
                 num_bits: self.num_bits,
                 value: Backing { val },
             }
         } else {
             cold_path();
-            let num_words = self.num_words();
             let ptr = crate::alloc::alloc_bits(self.num_bits);
-            // SAFETY: We know both of them are not interned.
+            // SAFETY: We know this is not interned from the above check.
             let lhs = unsafe { self.as_slice() };
+            // SAFETY: We know this is not interned from the above check.
             let rhs = unsafe { rhs.as_slice() };
-            for i in 0..num_words {
-                let val = lhs[i] | rhs[i];
-                unsafe { ptr.add(i).write(val) };
+            // Check above that both values have the same number of words so this loop does what we want.
+            for (i, (l, r)) in lhs.iter().zip(rhs.iter()).enumerate() {
+                let val = l | r;
+                // SAFETY: This requires that `i` * sizeof(u64) does not overflow an `isize`. The largest theoretical
+                // allocation is 2**32 / 8 bytes whic is less than 600 million. That is less than a u32 so cannot
+                // overflow an `isize`. Also requires that the calculated pointer be valid. Since this is from an
+                // allocation of a known size, that will be the case.
+                let offset = unsafe { ptr.add(i) };
+                // SAFETY: See above comment. This will be aligned and point to allocated memory that we can write to.
+                unsafe { offset.write(val) };
             }
             Self {
                 num_bits: self.num_bits,
@@ -292,6 +341,7 @@ impl Clone for Value {
             Self {
                 num_bits: self.num_bits,
                 value: Backing {
+                    // SAFETY: We know the value is interned so the value field of the union must be inhabited.
                     val: unsafe { self.value.val },
                 },
             }
@@ -299,9 +349,14 @@ impl Clone for Value {
             cold_path();
             let num_words = self.num_words();
             let ptr = crate::alloc::alloc_bits(self.num_bits);
-            // SAFETY: We know both of them are not interned.
+            // SAFETY: We check above that the value is not interned so we know the pointer value of the union
+            // is inhabited.
+            let src_ptr = unsafe { self.value.ptr.as_ptr() };
+            // SAFETY: Both pointers are valid for `num_words` reads and writes. That's how many words they were allocated
+            // with. They were also separate allocations so will not overlap at all. Alignment is fine as the allocation
+            // function we use guarantees correct alignment for a u64.
             unsafe {
-                std::ptr::copy(self.value.ptr.as_ptr(), ptr.as_ptr(), num_words);
+                std::ptr::copy(src_ptr, ptr.as_ptr(), num_words);
             }
             Self {
                 num_bits: self.num_bits,
@@ -325,7 +380,8 @@ impl Drop for Value {
 impl From<&[u64]> for Value {
     fn from(value: &[u64]) -> Self {
         if value.len() == 1 {
-            let val = value[0];
+            // SAFETY: We know the slice has exactly one element because the length check above.
+            let val = unsafe { *value.get_unchecked(0) };
             Self {
                 num_bits: 64,
                 value: Backing { val },
