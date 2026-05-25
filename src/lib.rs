@@ -330,4 +330,12 @@ mod test {
         let big_c = big_a + big_b;
         assert_eq!(big_c.get_slice(), &[0, 6]);
     }
+
+    #[test]
+    fn different_sized_add() {
+        let a = Value::new_u8(12);
+        let b = Value::new_u16(100);
+        let result = std::panic::catch_unwind(|| a + b);
+        assert!(result.is_err());
+    }
 }
