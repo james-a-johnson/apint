@@ -15,6 +15,14 @@ pub struct Value {
     value: Backing,
 }
 
+// SAFETY: Value will not automatically be marked as Send because it contains a `NonNull` in the `Backing` field.
+// However, the data that points to is owned heap memory that is not aliased by anything else. That means this struct
+// is safe to send to another thread.
+unsafe impl Send for Value {}
+// SAFETY: Not automatically Sync because of the `NonNull` in the `Backing` field. However, that points to owned
+// heap allocated data. It is safe to share references to taht data across threads.
+unsafe impl Sync for Value {}
+
 impl Value {
     #[inline]
     pub fn new_u8(val: u8) -> Self {
