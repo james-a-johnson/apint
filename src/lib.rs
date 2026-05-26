@@ -167,8 +167,12 @@ impl Value {
             clippy::arithmetic_side_effects,
             reason = "This is guaranteed to never underflow"
         )]
-        let zero_bits = 64 - (self.num_bits % 64);
-        let mask = u64::MAX >> zero_bits;
+        let zero_bits = ((self.num_bits - 1) % 64) + 1;
+        #[expect(
+            clippy::arithmetic_side_effects,
+            reason = "zero_bits is guaranteed to be positive and less than 64"
+        )]
+        let mask = u64::MAX >> (64 - zero_bits);
         if self.interned() {
             // SAFETY: We know this is interned so the `val` field is inhabited.
             unsafe {
@@ -327,6 +331,33 @@ impl Add for Value {
     }
 }
 
+impl Add for &Value {
+    type Output = Value;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        assert!(
+            self.num_bits == rhs.num_bits,
+            "Adding values with different bit widths"
+        );
+        let mut new_value = if self.interned() {
+            // SAFETY: We know both of the values are interned in this branch.
+            let left = unsafe { self.value.val };
+            // SAFETY: We know both of the values are interned in this branch.
+            let right = unsafe { rhs.value.val };
+            let val = left.wrapping_add(right);
+            Value {
+                num_bits: self.num_bits,
+                value: Backing { val },
+            }
+        } else {
+            cold_path();
+            self.big_add(rhs, false)
+        };
+        new_value.clear_unused_bits();
+        new_value
+    }
+}
+
 impl BitOr for Value {
     type Output = Self;
 
@@ -368,6 +399,56 @@ impl BitOr for Value {
                 num_bits: self.num_bits,
                 value: Backing { ptr },
             }
+        }
+    }
+}
+
+/// Compares that the two values have the same number of bits and then that the value is the same.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        if self.num_bits != other.num_bits {
+            return false;
+        }
+        if self.interned() {
+            // SAFETY: We know both values are interned here.
+            let left = unsafe { self.value.val };
+            // SAFETY: We know both values are interned here.
+            let right = unsafe { other.value.val };
+            left == right
+        } else {
+            // SAFETY: We know both values are heap allocated here.
+            let left = unsafe { self.as_slice() };
+            // SAFETY: We know both values are heap allocated here.
+            let right = unsafe { other.as_slice() };
+            left == right
+        }
+    }
+}
+
+impl Eq for Value {}
+
+/// Partial ordering for values.
+///
+/// Can only compare values with the same number of bits.
+///
+/// Otherwise is just a standard ordering of unsigned values.
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if self.num_bits != other.num_bits {
+            return None;
+        }
+        if self.interned() {
+            // SAFETY: We know both values are interned here.
+            let left = unsafe { self.value.val };
+            // SAFETY: We know both values are interned here.
+            let right = unsafe { other.value.val };
+            Some(left.cmp(&right))
+        } else {
+            // SAFETY: We know both values are heap allocated here.
+            let left = unsafe { self.as_slice() };
+            // SAFETY: We know both values are heap allocated here.
+            let right = unsafe { other.as_slice() };
+            Some(left.iter().rev().cmp(right.iter().rev()))
         }
     }
 }
@@ -561,5 +642,45 @@ mod test {
         assert!(result.is_err());
         let result = std::panic::catch_unwind(|| Value::parse_from_words(&[], 0));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn equality() {
+        let a = Value::new_u16(128);
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        let c = &a + &b;
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+
+        let a = Value::parse_from_words(&[0x20, 0x60], 128);
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        let c = &a + &b;
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn ordering() {
+        let a = Value::new_u16(12);
+        let b = a.clone();
+        let c = &a + &b;
+        assert!(a < c);
+        assert!(b < c);
+        assert!(c > b);
+
+        let a = Value::new_u16(100);
+        let b = Value::new_u32(100);
+        assert_eq!(None, a.partial_cmp(&b));
+
+        let a = Value::parse_from_words(&[0xaa, 0xbb], 128);
+        let b = a.clone();
+        let c = &a + &b;
+        assert!(a < c);
+        assert!(b < c);
+        assert!(c > b);
     }
 }
