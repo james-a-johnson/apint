@@ -98,6 +98,7 @@ impl Value {
 
     pub fn parse_from_words(data: &[u64], num_bits: u32) -> Self {
         let num_words = num_bits.div_ceil(64);
+        assert!(num_bits > 0, "Cannot parse 0 bits");
         assert!(data.len() >= num_words as usize, "Not enough data to parse");
         let mut value = if num_bits <= 64 {
             // SAFETY: We know that `data` has at least one element from the above check.
@@ -161,6 +162,7 @@ impl Value {
 
     /// Clear any high bits that are not used.
     fn clear_unused_bits(&mut self) {
+        debug_assert!(self.num_bits > 0, "Created a zero bit value");
         #[expect(
             clippy::arithmetic_side_effects,
             reason = "This is guaranteed to never underflow"
@@ -546,5 +548,18 @@ mod test {
             72,
         );
         assert_eq!(b.get_slice(), &[0x8877665544332211, 0x99]);
+    }
+
+    #[test]
+    fn zero_bits_panic() {
+        let result = std::panic::catch_unwind(|| Value::parse_from_bytes(&[1, 2, 3], 0));
+        assert!(result.is_err());
+        let result = std::panic::catch_unwind(|| Value::parse_from_bytes(&[], 0));
+        assert!(result.is_err());
+
+        let result = std::panic::catch_unwind(|| Value::parse_from_words(&[1, 2, 3], 0));
+        assert!(result.is_err());
+        let result = std::panic::catch_unwind(|| Value::parse_from_words(&[], 0));
+        assert!(result.is_err());
     }
 }
